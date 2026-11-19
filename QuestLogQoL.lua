@@ -1,6 +1,12 @@
 local addonName = ...
 local hooked = false
 local rowsByButton = {}
+local defaultCompletedColor = { r = 0.45, g = 0.90, b = 0.48 }
+
+local function GetCompletedColor()
+	local color = QuestLogQoLSettings.completedColor or defaultCompletedColor
+	return color.r, color.g, color.b
+end
 
 local function GetObjectives(questID)
 	return C_QuestLog.GetQuestObjectives(questID) or {}
@@ -29,6 +35,7 @@ local function AddCompletedObjectives()
 		if anchor then nextRow[anchor] = row end
 	end
 
+	local r, g, b = GetCompletedColor()
 	local resized = false
 	for button in scroll.titleFramePool:EnumerateActive() do
 		local questID = button.info.questID
@@ -56,14 +63,14 @@ local function AddCompletedObjectives()
 				local row = rows[count]
 				if not row then
 					row = CreateFrame("Frame", nil, button, "QuestLogObjectiveTemplate")
-					row.Text:SetTextColor(0.45, 0.90, 0.48)
-					row.Dash:SetTextColor(0.45, 0.90, 0.48)
 					rows[count] = row
 				end
 
 				local gap = anchor == button.Text and 3 or 2
 				row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -gap)
 				row.Text:SetText(objective.text)
+				row.Text:SetTextColor(r, g, b)
+				row.Dash:SetTextColor(r, g, b)
 				row:Show()
 				local height = row.Text:GetStringHeight()
 				row:SetHeight(height)
@@ -94,16 +101,47 @@ local function InstallHook()
 end
 
 local optionLabel = "Show Completed Quest Objectives"
+local colorSwatchTooltip = "Completed Objective Colour"
+local colorSwatchGap, colorSwatchSize = 8, 16
 
 local function ShowCompleted()
 	return QuestLogQoLSettings.showCompleted ~= false
 end
 
-local function SetShowCompleted(enabled)
-	QuestLogQoLSettings.showCompleted = enabled
+local function RefreshQuestLog()
 	if hooked and QuestMapFrame.QuestsFrame:IsVisible() then
 		QuestLogQuests_Update()
 	end
+end
+
+local function SetShowCompleted(enabled)
+	QuestLogQoLSettings.showCompleted = enabled
+	RefreshQuestLog()
+end
+
+local function OpenCompletedColorPicker(updateSwatch)
+	local previousColor = QuestLogQoLSettings.completedColor
+	local r, g, b = GetCompletedColor()
+
+	local function ApplyColor(color)
+		QuestLogQoLSettings.completedColor = color
+		if updateSwatch then updateSwatch() end
+		RefreshQuestLog()
+	end
+
+	ColorPickerFrame:SetupColorPickerAndShow({
+		r = r,
+		g = g,
+		b = b,
+		hasOpacity = false,
+		swatchFunc = function()
+			local red, green, blue = ColorPickerFrame:GetColorRGB()
+			ApplyColor({ r = red, g = green, b = blue })
+		end,
+		cancelFunc = function()
+			ApplyColor(previousColor)
+		end,
+	})
 end
 
 local function RegisterQuestLogOption()
@@ -118,9 +156,29 @@ local function RegisterQuestLogOption()
 			local tooltip = description:GetTooltipFrame()
 			tooltip:SetOwner(frame, "ANCHOR_RIGHT")
 			tooltip:SetText(optionLabel)
-			tooltip:AddLine("Keeps finished objectives visible in green under each quest. Requires Show Quest Objectives.", 1, 1, 1, true)
+			tooltip:AddLine("Keeps finished objectives visible under each quest. Requires Show Quest Objectives.", 1, 1, 1, true)
 			tooltip:AddLine("Added by QuestLogQoL.", 0.7, 0.7, 0.7, true)
 			tooltip:Show()
+		end)
+		checkbox:AddInitializer(function(row, _, menu)
+			local button = MenuTemplates.AttachBasicButton(row, colorSwatchSize, colorSwatchSize)
+			button:SetPoint("LEFT", row.fontString, "RIGHT", colorSwatchGap, 0)
+			button:RegisterForClicks("LeftButtonUp")
+
+			local swatch = row:AttachTemplate("ColorSwatchTemplate")
+			swatch:SetFrameStrata(row:GetFrameStrata())
+			swatch:SetAllPoints(button)
+			swatch:SetColorRGB(GetCompletedColor())
+			swatch:EnableMouse(false)
+			swatch:Show()
+			MenuTemplates.SetUtilityButtonTooltipText(button, colorSwatchTooltip)
+			button:SetScript("OnClick", function()
+				Menu.GetManager():CloseMenu(menu)
+				OpenCompletedColorPicker()
+			end)
+
+			local labelWidth = row.leftTexture1:GetWidth() + 7 + row.fontString:GetWidth()
+			return labelWidth + colorSwatchGap + colorSwatchSize, row.fontString:GetHeight()
 		end)
 	end)
 end
@@ -137,8 +195,23 @@ local function RegisterOptions()
 	label:SetPoint("LEFT", checkbox, "RIGHT", 4, 0)
 	label:SetText(optionLabel)
 
+	local swatch = CreateFrame("Button", nil, panel, "ColorSwatchTemplate")
+	swatch:SetPoint("LEFT", label, "RIGHT", colorSwatchGap, -1)
+	swatch:SetSize(colorSwatchSize, colorSwatchSize)
+	swatch:RegisterForClicks("LeftButtonUp")
+	MenuTemplates.SetUtilityButtonTooltipText(swatch, colorSwatchTooltip)
+
+	local function UpdateSwatch()
+		swatch:SetColorRGB(GetCompletedColor())
+	end
+	UpdateSwatch()
+	swatch:SetScript("OnClick", function()
+		OpenCompletedColorPicker(UpdateSwatch)
+	end)
+
 	panel:SetScript("OnShow", function()
 		checkbox:SetChecked(ShowCompleted())
+		UpdateSwatch()
 	end)
 	checkbox:SetScript("OnClick", function(self)
 		SetShowCompleted(not not self:GetChecked())
