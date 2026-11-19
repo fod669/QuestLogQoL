@@ -145,6 +145,15 @@ local function OpenCompletedColorPicker(updateSwatch)
 end
 
 local function RegisterQuestLogOption()
+	Menu.ModifyMenu("MENU_QUEST_MAP_FRAME", function(_, root)
+		root:CreateButton("Expand All", function()
+			ExpandQuestHeader(0)
+		end)
+		root:CreateButton("Collapse All", function()
+			CollapseQuestHeader(0)
+		end)
+	end)
+
 	Menu.ModifyMenu("MENU_QUEST_MAP_FRAME_SETTINGS", function(_, root)
 		local checkbox = root:CreateCheckbox(optionLabel, ShowCompleted, function()
 			SetShowCompleted(not ShowCompleted())
