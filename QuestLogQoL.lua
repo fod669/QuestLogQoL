@@ -20,7 +20,7 @@ local function NormalizeText(text)
 	return (text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):match("^%s*(.-)%s*$"))
 end
 
-local function AddCompletedObjectives(scroll, hideObjectives)
+local function AddCompletedObjectives(scroll, hideObjectives, supplementalRows)
 	for _, rows in pairs(rowsByButton) do
 		for _, row in ipairs(rows) do
 			row:Hide()
@@ -28,8 +28,9 @@ local function AddCompletedObjectives(scroll, hideObjectives)
 		end
 	end
 
-	if hideObjectives or QuestLogQoLSettings.showCompleted == false
-		or not GetCVarBool("showQuestObjectivesInLog") then return end
+	if hideObjectives or not GetCVarBool("showQuestObjectivesInLog") then return end
+	local showCompleted = QuestLogQoLSettings.showCompleted ~= false
+	if not showCompleted and not supplementalRows then return end
 
 	-- The native objective rows form an anchor chain starting at the title text.
 	local nextRow = {}
@@ -41,6 +42,7 @@ local function AddCompletedObjectives(scroll, hideObjectives)
 	local r, g, b = GetCompletedColor()
 	local resized = false
 	for button in scroll.titleFramePool:EnumerateActive() do
+		local supplemental = supplementalRows and supplementalRows[button]
 		local questID = button.info.questID
 		local nativeText = {}
 		local anchor = button.Text
@@ -54,7 +56,8 @@ local function AddCompletedObjectives(scroll, hideObjectives)
 
 		local count, addedHeight = 0, 0
 		for _, objective in ipairs(GetObjectives(questID)) do
-			if objective.finished and objective.text and objective.text ~= ""
+			local shouldShow = (objective.finished and showCompleted) or (supplemental and not objective.finished)
+			if shouldShow and objective.text and objective.text ~= ""
 				and not nativeText[NormalizeText(objective.text)] then
 				count = count + 1
 				local rows = rowsByButton[button]
@@ -73,8 +76,13 @@ local function AddCompletedObjectives(scroll, hideObjectives)
 				local gap = anchor == button.Text and 3 or 2
 				row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -gap)
 				row.Text:SetText(objective.text)
-				row.Text:SetTextColor(r, g, b)
-				row.Dash:SetTextColor(r, g, b)
+				if objective.finished then
+					row.Text:SetTextColor(r, g, b)
+					row.Dash:SetTextColor(r, g, b)
+				else
+					row.Text:SetTextColor(HIGHLIGHT_FONT_COLOR:GetRGB())
+					row.Dash:SetTextColor(HIGHLIGHT_FONT_COLOR:GetRGB())
+				end
 				row:Show()
 				local height = row.Text:GetStringHeight()
 				row:SetHeight(height)
@@ -126,13 +134,61 @@ local function OnAllZonesHeaderClick(header, mouseButton)
 		local menu = MenuUtil.CreateContextMenu(header, function(_, root)
 			root:CreateButton(QUEST_LOG_TRACK_ALL, function() SetAllZonesTracked(true) end)
 			root:CreateButton(QUEST_LOG_UNTRACK_ALL, function() SetAllZonesTracked(false) end)
-			root:CreateButton("Expand All", function() SetAllZonesCollapsed(false) end)
-			root:CreateButton("Collapse All", function() SetAllZonesCollapsed(true) end)
 		end)
 		if InputUtil.IsGamepadUIEnabled() then
 			menu:SetPoint("TOPLEFT", header, "BOTTOMLEFT")
 		end
 	end
+end
+
+local function MatchesQuestSearch(info, query)
+	if query == "" or info.title:lower():find(query, 1, true) then return true end
+	local _, logText = GetQuestLogQuestText(info.questLogIndex)
+	if logText and logText:lower():find(query, 1, true) then return true end
+	for _, objective in ipairs(GetObjectives(info.questID)) do
+		if objective.text and objective.text:lower():find(query, 1, true) then return true end
+	end
+	return false
+end
+
+local function AddMissingQuestRows(scroll)
+	local present, added = {}, {}
+	for button in scroll.titleFramePool:EnumerateActive() do
+		present[button.questID] = true
+	end
+
+	local query = (scroll.SearchBox:GetText() or ""):lower()
+	for index = 1, C_QuestLog.GetNumQuestLogEntries() do
+		local info = C_QuestLog.GetInfo(index)
+		if info and not info.isHeader and info.questID and info.questID > 0
+			and info.title and info.title ~= "" and not present[info.questID]
+			and MatchesQuestSearch(info, query) then
+			-- Use Blizzard's title template so details, tracking and context menus work.
+			local button = scroll.titleFramePool:Acquire()
+			button.info = info
+			button.questID = info.questID
+			button.questLogIndex = info.questLogIndex
+			button:ClearAllPoints()
+			button:SetPoint("TOPLEFT")
+			button.TagText:Hide()
+			button.TagTexture:Hide()
+			button.StorylineTexture:Hide()
+			button.TaskIcon:Hide()
+			button.StorylineTexture:ClearAllPoints()
+			button.StorylineTexture:SetPoint("LEFT", button.Checkbox)
+			button.Text:SetPoint("RIGHT", button.StorylineTexture, "LEFT", -4, 0)
+			button.Text:SetText(QuestUtils_DecorateQuestText(info.questID, info.title, false, true, true))
+			local color = GetDifficultyColor(C_PlayerInfo.GetContentDifficultyQuestForPlayer(info.questID))
+			button.Text:SetTextColor(color.r, color.g, color.b)
+			button.Checkbox.CheckMark:SetShown(C_QuestLog.GetQuestWatchType(info.questID) ~= nil)
+			button.HighlightTexture:SetShown(scroll.calloutQuestID == info.questID)
+			button:SetHeight(button.Text:GetHeight() + 14)
+			button:Show()
+			present[info.questID] = true
+			added[button] = true
+		end
+	end
+	return next(added) and added or nil
 end
 
 local function ShowAllZones(scroll, collapsed)
@@ -164,6 +220,7 @@ local function ShowAllZones(scroll, collapsed)
 		return
 	end
 
+	local supplementalRows = AddMissingQuestRows(scroll)
 	local quests = {}
 	for button in scroll.titleFramePool:EnumerateActive() do
 		quests[#quests + 1] = button
@@ -179,6 +236,12 @@ local function ShowAllZones(scroll, collapsed)
 		-- Match Blizzard's spacing between consecutive quest rows.
 		button.topPadding = index == 1 and 2 or -3
 	end
+	if supplementalRows then
+		local displayState = { hasShownAnyHeader = true }
+		scroll.SearchBox:UpdateState(displayState)
+		scroll:UpdateBackground(displayState)
+	end
+	return supplementalRows
 end
 
 local rebuildingFlatLog = false
@@ -219,12 +282,13 @@ local function UpdateQuestRows()
 
 	local collapsed = flat and QuestLogQoLSettings.allZonesCollapsed == true
 	local headerWasShown = allZonesHeader and allZonesHeader:IsShown()
+	local supplementalRows
 	if flat then
-		ShowAllZones(scroll, collapsed)
+		supplementalRows = ShowAllZones(scroll, collapsed)
 	elseif headerWasShown then
 		allZonesHeader:Hide()
 	end
-	local resized = AddCompletedObjectives(scroll, collapsed)
+	local resized = AddCompletedObjectives(scroll, collapsed, supplementalRows)
 	if flat or headerWasShown or resized then scroll.Contents:Layout() end
 end
 
@@ -326,6 +390,12 @@ end
 
 local function RegisterQuestLogOption()
 	Menu.ModifyMenu("MENU_QUEST_MAP_FRAME", function(_, root)
+		root:CreateButton("Track All Zones", function()
+			SetAllZonesTracked(true)
+		end)
+		root:CreateButton("Untrack All Zones", function()
+			SetAllZonesTracked(false)
+		end)
 		root:CreateButton("Expand All", function()
 			ExpandQuestHeader(0)
 		end)
