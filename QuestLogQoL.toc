@@ -1,0 +1,7 @@
+## Interface: 16000, 16001
+## Title: QuestLogQoL
+## Notes: Shows completed objectives in green inside Blizzard's Map & Quest Log. /qlql for diagnostics.
+## Version: 0.4.0
+## SavedVariables: QuestLogQoLSettings
+
+QuestLogQoL.lua
