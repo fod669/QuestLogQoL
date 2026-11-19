@@ -8,6 +8,10 @@ local function GetCompletedColor()
 	return color.r, color.g, color.b
 end
 
+local function UseFlatQuestLog()
+	return QuestLogQoLSettings.flatQuestLog == true
+end
+
 local function GetObjectives(questID)
 	return C_QuestLog.GetQuestObjectives(questID) or {}
 end
@@ -16,8 +20,7 @@ local function NormalizeText(text)
 	return (text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):match("^%s*(.-)%s*$"))
 end
 
-local function AddCompletedObjectives()
-	local scroll = QuestMapFrame.QuestsFrame.ScrollFrame
+local function AddCompletedObjectives(scroll, hideObjectives)
 	for _, rows in pairs(rowsByButton) do
 		for _, row in ipairs(rows) do
 			row:Hide()
@@ -25,7 +28,7 @@ local function AddCompletedObjectives()
 		end
 	end
 
-	if QuestLogQoLSettings.showCompleted == false
+	if hideObjectives or QuestLogQoLSettings.showCompleted == false
 		or not GetCVarBool("showQuestObjectivesInLog") then return end
 
 	-- The native objective rows form an anchor chain starting at the title text.
@@ -63,6 +66,7 @@ local function AddCompletedObjectives()
 				local row = rows[count]
 				if not row then
 					row = CreateFrame("Frame", nil, button, "QuestLogObjectiveTemplate")
+					row:EnableMouse(false)
 					rows[count] = row
 				end
 
@@ -86,7 +90,158 @@ local function AddCompletedObjectives()
 		end
 	end
 
-	if resized then scroll.Contents:Layout() end
+	return resized
+end
+
+local allZonesHeader
+
+local function SetAllZonesCollapsed(collapsed)
+	QuestLogQoLSettings.allZonesCollapsed = collapsed
+	QuestLogQuests_Update()
+end
+
+local function SetAllZonesTracked(tracked)
+	local wasIgnoringUpdates = QuestMapFrame.ignoreQuestWatchListChanged
+	QuestMapFrame.ignoreQuestWatchListChanged = true
+	for index = 1, C_QuestLog.GetNumQuestLogEntries() do
+		local info = C_QuestLog.GetInfo(index)
+		if info and not info.isHeader and info.questID and info.questID > 0 then
+			local watched = QuestUtils_IsQuestWatched(info.questID)
+			if tracked and not watched then
+				C_QuestLog.AddQuestWatch(info.questID)
+			elseif not tracked and watched and QuestUtil.CanRemoveQuestWatch() then
+				C_QuestLog.RemoveQuestWatch(info.questID)
+			end
+		end
+	end
+	QuestMapFrame.ignoreQuestWatchListChanged = wasIgnoringUpdates
+	QuestMapFrame_UpdateAll()
+end
+
+local function OnAllZonesHeaderClick(header, mouseButton)
+	PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+	if mouseButton == "LeftButton" then
+		SetAllZonesCollapsed(not QuestLogQoLSettings.allZonesCollapsed)
+	elseif mouseButton == "RightButton" then
+		local menu = MenuUtil.CreateContextMenu(header, function(_, root)
+			root:CreateButton(QUEST_LOG_TRACK_ALL, function() SetAllZonesTracked(true) end)
+			root:CreateButton(QUEST_LOG_UNTRACK_ALL, function() SetAllZonesTracked(false) end)
+			root:CreateButton("Expand All", function() SetAllZonesCollapsed(false) end)
+			root:CreateButton("Collapse All", function() SetAllZonesCollapsed(true) end)
+		end)
+		if InputUtil.IsGamepadUIEnabled() then
+			menu:SetPoint("TOPLEFT", header, "BOTTOMLEFT")
+		end
+	end
+end
+
+local function ShowAllZones(scroll, collapsed)
+	scroll.headerFramePool:ReleaseAll()
+	scroll.campaignHeaderFramePool:ReleaseAll()
+	scroll.campaignHeaderMinimalFramePool:ReleaseAll()
+	scroll.covenantCallingsHeaderFramePool:ReleaseAll()
+	scroll.Contents.StoryHeader:Hide()
+	scroll.Contents.Separator:Hide()
+
+	if not allZonesHeader then
+		allZonesHeader = CreateFrame("Button", nil, scroll.Contents, "QuestLogHeaderTemplate")
+		allZonesHeader:SetText("All Zones")
+		allZonesHeader:SetClickHandler(OnAllZonesHeaderClick)
+		allZonesHeader.layoutIndex = 0
+		allZonesHeader.topPadding = 8
+		allZonesHeader.buttonContext = "ButtonContext_QuestLogHeader"
+	end
+	allZonesHeader:UpdateCollapsedState(nil, { isCollapsed = collapsed })
+	allZonesHeader:Show()
+
+	if collapsed then
+		for button in scroll.titleFramePool:EnumerateActive() do
+			local poi = scroll.Contents:FindButtonByQuestID(button.questID)
+			if poi then poi:Hide() end
+			button:Hide()
+		end
+		scroll.objectiveFramePool:ReleaseAll()
+		return
+	end
+
+	local quests = {}
+	for button in scroll.titleFramePool:EnumerateActive() do
+		quests[#quests + 1] = button
+	end
+	table.sort(quests, function(a, b)
+		if a.info.level ~= b.info.level then
+			return a.info.level < b.info.level
+		end
+		return a.questLogIndex < b.questLogIndex
+	end)
+	for index, button in ipairs(quests) do
+		button.layoutIndex = index
+		-- Match Blizzard's spacing between consecutive quest rows.
+		button.topPadding = index == 1 and 2 or -3
+	end
+end
+
+local rebuildingFlatLog = false
+local function UpdateQuestRows()
+	local scroll = QuestMapFrame.QuestsFrame.ScrollFrame
+	local flat = UseFlatQuestLog()
+	if flat and not rebuildingFlatLog then
+		local groupedStates = QuestLogQoLSettings.groupedHeaderStates or {}
+		QuestLogQoLSettings.groupedHeaderStates = groupedStates
+		local collapsedHeaders = {}
+		for index = 1, C_QuestLog.GetNumQuestLogEntries() do
+			local info = C_QuestLog.GetInfo(index)
+			if info and info.isHeader then
+				local key = info.headerSortKey
+				if key ~= nil and groupedStates[key] == nil then
+					groupedStates[key] = not not info.isCollapsed
+				end
+				if info.isCollapsed then
+					collapsedHeaders[#collapsedHeaders + 1] = index
+				end
+			end
+		end
+
+		if #collapsedHeaders > 0 then
+			-- Keep native groups expanded so their quest rows stay active and interactive.
+			local wasIgnoringUpdates = QuestMapFrame.ignoreQuestLogUpdate
+			QuestMapFrame.ignoreQuestLogUpdate = true
+			rebuildingFlatLog = true
+			for _, index in ipairs(collapsedHeaders) do
+				ExpandQuestHeader(index, true)
+			end
+			QuestLogQuests_Update()
+			rebuildingFlatLog = false
+			QuestMapFrame.ignoreQuestLogUpdate = wasIgnoringUpdates
+			return
+		end
+	end
+
+	local collapsed = flat and QuestLogQoLSettings.allZonesCollapsed == true
+	local headerWasShown = allZonesHeader and allZonesHeader:IsShown()
+	if flat then
+		ShowAllZones(scroll, collapsed)
+	elseif headerWasShown then
+		allZonesHeader:Hide()
+	end
+	local resized = AddCompletedObjectives(scroll, collapsed)
+	if flat or headerWasShown or resized then scroll.Contents:Layout() end
+end
+
+local function ScrollToFlatQuest(scroll, questID)
+	if not UseFlatQuestLog() or QuestLogQoLSettings.allZonesCollapsed or not scroll:IsVisible() then return end
+	for button in scroll.titleFramePool:EnumerateActive() do
+		if button.questID == questID then
+			local above = button:GetTop() - scroll:GetTop()
+			local below = scroll:GetBottom() - button:GetBottom()
+			if above > 0 or below > 0 then
+				local offset = above > 0 and -above or below
+				local position = scroll:GetVerticalScroll() + offset
+				scroll:SetVerticalScroll(math.max(0, math.min(position, scroll:GetVerticalScrollRange())))
+			end
+			return
+		end
+	end
 end
 
 local function InstallHook()
@@ -95,12 +250,14 @@ local function InstallHook()
 	if not hooked and QuestLogQoLSettings
 		and scroll and scroll.titleFramePool and scroll.objectiveFramePool
 		and type(QuestLogQuests_Update) == "function" then
-		hooksecurefunc("QuestLogQuests_Update", AddCompletedObjectives)
+		hooksecurefunc("QuestLogQuests_Update", UpdateQuestRows)
+		hooksecurefunc(scroll, "ScrollToQuest", ScrollToFlatQuest)
 		hooked = true
 	end
 end
 
 local optionLabel = "Show Completed Quest Objectives"
+local flatQuestLogLabel = "Group All Zones"
 local colorSwatchTooltip = "Completed Objective Colour"
 local colorSwatchGap, colorSwatchSize = 8, 16
 
@@ -116,6 +273,29 @@ end
 
 local function SetShowCompleted(enabled)
 	QuestLogQoLSettings.showCompleted = enabled
+	RefreshQuestLog()
+end
+
+local function SetFlatQuestLog(enabled)
+	QuestLogQoLSettings.flatQuestLog = enabled
+	local groupedStates = QuestLogQoLSettings.groupedHeaderStates
+	if not enabled and groupedStates then
+		local wasIgnoringUpdates = QuestMapFrame.ignoreQuestLogUpdate
+		QuestMapFrame.ignoreQuestLogUpdate = true
+		for index = 1, C_QuestLog.GetNumQuestLogEntries() do
+			local info = C_QuestLog.GetInfo(index)
+			if info and info.isHeader then
+				local wasCollapsed = groupedStates[info.headerSortKey]
+				if wasCollapsed and not info.isCollapsed then
+					CollapseQuestHeader(index, true)
+				elseif wasCollapsed == false and info.isCollapsed then
+					ExpandQuestHeader(index, true)
+				end
+			end
+		end
+		QuestMapFrame.ignoreQuestLogUpdate = wasIgnoringUpdates
+		QuestLogQoLSettings.groupedHeaderStates = nil
+	end
 	RefreshQuestLog()
 end
 
@@ -189,6 +369,9 @@ local function RegisterQuestLogOption()
 			local labelWidth = row.leftTexture1:GetWidth() + 7 + row.fontString:GetWidth()
 			return labelWidth + colorSwatchGap + colorSwatchSize, row.fontString:GetHeight()
 		end)
+		root:CreateCheckbox(flatQuestLogLabel, UseFlatQuestLog, function()
+			SetFlatQuestLog(not UseFlatQuestLog())
+		end)
 	end)
 end
 
@@ -218,8 +401,18 @@ local function RegisterOptions()
 		OpenCompletedColorPicker(UpdateSwatch)
 	end)
 
+	local flatCheckbox = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+	flatCheckbox:SetPoint("TOPLEFT", checkbox, "BOTTOMLEFT", 0, -4)
+	local flatLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+	flatLabel:SetPoint("LEFT", flatCheckbox, "RIGHT", 4, 0)
+	flatLabel:SetText(flatQuestLogLabel)
+	flatCheckbox:SetScript("OnClick", function(self)
+		SetFlatQuestLog(not not self:GetChecked())
+	end)
+
 	panel:SetScript("OnShow", function()
 		checkbox:SetChecked(ShowCompleted())
+		flatCheckbox:SetChecked(UseFlatQuestLog())
 		UpdateSwatch()
 	end)
 	checkbox:SetScript("OnClick", function(self)
